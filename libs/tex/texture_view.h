@@ -248,15 +248,36 @@ TextureView::generate_validity_mask(void) {
 
     std::list<math::Vec2i> queue;
 
-    /* Start from the corners. */
-    queue.push_back(math::Vec2i(0,0));
-    checked->at(0, 0, 0) = 255;
-    queue.push_back(math::Vec2i(0, height - 1));
-    checked->at(0, height - 1, 0) = 255;
-    queue.push_back(math::Vec2i(width - 1, 0));
-    checked->at(width - 1, 0, 0) = 255;
-    queue.push_back(math::Vec2i(width - 1, height - 1));
-    checked->at(width - 1, height - 1, 0) = 255;
+    /* Start from the border */
+
+    // Top
+    int j = 0;
+    int i = 0;
+    for (i = 0; i < width; i++){
+        queue.push_back(math::Vec2i(i,j));
+        checked->at(i, j, 0) = 255;    
+    }
+
+    // Bottom
+    j = height - 1;
+    for (i = 0; i < width; i++){
+        queue.push_back(math::Vec2i(i,j));
+        checked->at(i, j, 0) = 255;    
+    }
+
+    // Left
+    i = 0;
+    for (j = 0; j < height; j++){
+        queue.push_back(math::Vec2i(i,j));
+        checked->at(i, j, 0) = 255;    
+    }
+
+    // Right
+    i = width - 1;
+    for (j = 0; j < height; j++){
+        queue.push_back(math::Vec2i(i,j));
+        checked->at(i, j, 0) = 255;    
+    }
 
     while (!queue.empty()) {
         math::Vec2i pixel = queue.front();

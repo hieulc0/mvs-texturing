@@ -178,6 +178,8 @@ calculate_face_projection_infos(mve::TriangleMesh::ConstPtr mesh,
                     texture_view->generate_gradient_magnitude<uint8_t>();
                     texture_view->erode_validity_mask();
                 }
+            }else if (settings.nadir_mode){
+                texture_view->erode_validity_mask();
             }
 
             math::Vec3f const & view_pos = texture_view->get_pos();

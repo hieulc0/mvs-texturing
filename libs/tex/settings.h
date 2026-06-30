@@ -94,6 +94,11 @@ struct Settings {
     bool keep_unseen_faces = false;
     bool nadir_mode = false;
 
+    /* Use the GPU-accelerated ray-mesh occlusion kernel in
+     * calculate_data_costs, when the binary was built with MVSTEX_GPU.
+     * Ignored (no-op) otherwise -- see docs/gpu-accel-texturing.md in ODX. */
+    bool use_gpu = false;
+
     int max_texture_size = 8 * 1024;
 };
 

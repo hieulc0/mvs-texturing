@@ -11,8 +11,8 @@ externalproject_add(ext_mapmap
 
 externalproject_add(ext_rayint
     PREFIX          ext_rayint
-    GIT_REPOSITORY  https://github.com/pierotofy/rayint.git
-    GIT_TAG         cuda
+    GIT_REPOSITORY  https://github.com/hieulc0/rayint.git
+    GIT_TAG         gpu-visibility-accessors
     UPDATE_COMMAND  ""
     SOURCE_DIR      ${CMAKE_SOURCE_DIR}/elibs/rayint
     CONFIGURE_COMMAND ""

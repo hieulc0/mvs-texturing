@@ -20,6 +20,7 @@
 #define NADIR_MODE    "nadir_mode"
 #define NUM_THREADS "num_threads"
 #define MAX_TEXTURE_SIZE "max_texture_size"
+#define GPU "gpu"
 
 Arguments parse_args(int argc, char **argv) {
     util::Arguments args;
@@ -95,6 +96,9 @@ Arguments parse_args(int argc, char **argv) {
         "How many threads to use. Set 1 for determinism.");
     args.add_option('\0', MAX_TEXTURE_SIZE, true,
         "Maximum size of output textures.");
+    args.add_option('\0', GPU, false,
+        "Use the GPU-accelerated ray-mesh visibility kernel, if this binary "
+        "was built with it (MVSTEX_GPU) [false]");
     args.parse(argc, argv);
 
     Arguments conf;
@@ -158,6 +162,8 @@ Arguments parse_args(int argc, char **argv) {
                 conf.num_threads = std::stoi(i->arg);
             } else if (i->opt->lopt == MAX_TEXTURE_SIZE) {
                 conf.settings.max_texture_size = std::stoi(i->arg);
+            } else if (i->opt->lopt == GPU) {
+                conf.settings.use_gpu = true;
             } else {
                 throw std::invalid_argument("Invalid long option");
             }
@@ -193,7 +199,8 @@ Arguments::to_string(){
         << "Outlier removal method: \t" << choice_string<tex::OutlierRemoval>(settings.outlier_removal) << std::endl
         << "Tone mapping: \t" << choice_string<tex::ToneMapping>(settings.tone_mapping) << std::endl
         << "Apply global seam leveling: \t" << bool_to_string(settings.global_seam_leveling) << std::endl
-        << "Apply local seam leveling: \t" << bool_to_string(settings.local_seam_leveling) << std::endl;
+        << "Apply local seam leveling: \t" << bool_to_string(settings.local_seam_leveling) << std::endl
+        << "Use GPU visibility kernel: \t" << bool_to_string(settings.use_gpu) << std::endl;
 
     return out.str();
 }

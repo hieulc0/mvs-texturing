@@ -59,5 +59,19 @@ include_directories(
     libs
 )
 
+option(MVSTEX_GPU "Build the CUDA-accelerated ray-mesh visibility kernel" OFF)
+if(MVSTEX_GPU)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    add_definitions(-DMVSTEX_GPU)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        # Only used if the caller (e.g. SuperBuild) didn't already set this
+        # via an init-cache file. 75 = Turing (the dev target at time of
+        # writing); see docs/gpu-accel-texturing.md in ODX for the
+        # multi-arch list normally passed in from outside.
+        set(CMAKE_CUDA_ARCHITECTURES 75)
+    endif()
+endif()
+
 add_subdirectory(libs)
 add_subdirectory(apps)

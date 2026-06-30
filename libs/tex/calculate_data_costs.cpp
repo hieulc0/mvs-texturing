@@ -8,6 +8,7 @@
  */
 
 #include <numeric>
+#include <memory>
 
 #include <mve/image_color.h>
 #include <acc/bvh_tree.h>
@@ -19,6 +20,10 @@
 #include "texturing.h"
 #include "sparse_table.h"
 #include "progress_counter.h"
+
+#ifdef MVSTEX_GPU
+#include "cuda/visibility_gpu.h"
+#endif
 
 typedef acc::BVHTree<unsigned int, math::Vec3f> BVHTree;
 
@@ -144,6 +149,24 @@ calculate_face_projection_infos(mve::TriangleMesh::ConstPtr mesh,
     BVHTree bvh_tree(faces, vertices);
     std::cout << "done. (Took: " << timer.get_elapsed() << " ms)" << std::endl;
 
+#ifdef MVSTEX_GPU
+    std::unique_ptr<GPUVisibilityTester> gpu_tester;
+    if (settings.use_gpu) {
+        gpu_tester.reset(new GPUVisibilityTester(bvh_tree));
+        if (gpu_tester->available()) {
+            std::cout << "\tGPU visibility kernel ready." << std::endl;
+        } else {
+            std::cout << "\tGPU visibility kernel unavailable (no/failed CUDA "
+                "device), falling back to CPU." << std::endl;
+        }
+    }
+    /* Only worth taking the GPU path if there's actually a geometric
+     * visibility test to batch -- if it's disabled, every face's
+     * visibility is trivially true regardless of GPU/CPU. */
+    bool const gpu_active = gpu_tester && gpu_tester->available()
+        && settings.geometric_visibility_test;
+#endif
+
     ProgressCounter view_counter("\tCalculating face qualities", num_views);
     #pragma omp parallel
     {
@@ -185,6 +208,156 @@ calculate_face_projection_infos(mve::TriangleMesh::ConstPtr mesh,
             math::Vec3f const & view_pos = texture_view->get_pos();
             math::Vec3f const & viewing_direction = texture_view->get_viewing_direction();
 
+            /* Computes quality/nadir-scoring/colorspace for one face once its
+             * visibility is known, and pushes the result -- this is the tail
+             * of the original single-pass per-face logic, factored out so
+             * both the CPU loop and the GPU two-pass loop below call the
+             * exact same code instead of maintaining two copies. */
+            auto finish_face = [&](std::size_t face_id, math::Vec3f const & v1,
+                    math::Vec3f const & v2, math::Vec3f const & v3,
+                    math::Vec3f const & face_to_view_vec, bool visible) {
+                FaceProjectionInfo info = {j, 0.0f, math::Vec3f(0.0f, 0.0f, 0.0f)};
+
+                if (texture_view->get_image()->get_type() == mve::IMAGE_TYPE_FLOAT){
+                    texture_view->get_face_info<float>(v1, v2, v3, &info, settings);
+                }else if (texture_view->get_image()->get_type() == mve::IMAGE_TYPE_UINT16){
+                    texture_view->get_face_info<uint16_t>(v1, v2, v3, &info, settings);
+                }else{
+                    texture_view->get_face_info<uint8_t>(v1, v2, v3, &info, settings);
+                }
+
+                if (info.quality == 0.0) return;
+
+                if (settings.nadir_mode){
+                    math::Vec3f up(0, 0, 1);
+                    float m1 = up.dot(face_to_view_vec);
+                    float m2 = up.dot(viewing_direction);
+                    float score = (m1*m1)*(m1*m1)*(m2*m2);
+                    if (!visible) info.quality = 1.0f * score;
+                    else{
+                        info.quality = std::max(1.0f, 10000.0f * score);
+                    }
+                }
+
+                /* Change color space. */
+                mve::image::color_rgb_to_ycbcr(*(info.mean_color));
+
+                std::pair<std::size_t, FaceProjectionInfo> pair(face_id, info);
+                projected_face_view_infos.push_back(pair);
+            };
+
+#ifdef MVSTEX_GPU
+            if (gpu_active) {
+                /* Two passes: (1) cull as before and collect the rays that
+                 * need an occlusion test instead of testing them inline,
+                 * (2) one batched GPU call per view, then finish each
+                 * candidate face with the result. Vertical faces (nadir
+                 * mode) skip the visibility test entirely in the original
+                 * algorithm too, so they're finished immediately in pass 1,
+                 * same as before. */
+                struct DeferredFace {
+                    math::Vec3f v1, v2, v3, face_to_view_vec;
+                };
+                std::vector<std::size_t> pending_face_ids;
+                std::vector<DeferredFace> pending_geom;
+                std::vector<GPUVisibilityTester::Ray> pending_rays;
+
+                for (std::size_t i = 0; i < faces.size(); i += 3) {
+                    std::size_t face_id = i / 3;
+
+                    math::Vec3f const & v1 = vertices[faces[i]];
+                    math::Vec3f const & v2 = vertices[faces[i + 1]];
+                    math::Vec3f const & v3 = vertices[faces[i + 2]];
+                    math::Vec3f const & face_normal = face_normals[face_id];
+                    math::Vec3f const face_center = (v1 + v2 + v3) / 3.0f;
+
+                    math::Vec3f view_to_face_vec = (face_center - view_pos).normalized();
+                    math::Vec3f face_to_view_vec = (view_pos - face_center).normalized();
+                    math::Vec3f up(0, 0, 1);
+
+                    bool vertical = false;
+                    if (settings.nadir_mode && fabs(up.dot(face_normal)) < 0.5) vertical = true;
+
+                    if (!vertical){
+                        float viewing_angle = face_to_view_vec.dot(face_normal);
+                        if (viewing_angle < 0.0f || viewing_direction.dot(view_to_face_vec) < 0.0f)
+                            continue;
+
+                        if (std::acos(viewing_angle) > MATH_DEG2RAD(settings.nadir_mode ? 90.0f : 75.0f))
+                            continue;
+                    }
+
+                    if (!texture_view->inside(v1, v2, v3))
+                        continue;
+
+                    if (vertical) {
+                        finish_face(face_id, v1, v2, v3, face_to_view_vec, /*visible=*/true);
+                        continue;
+                    }
+
+                    pending_face_ids.push_back(face_id);
+                    pending_geom.push_back({v1, v2, v3, face_to_view_vec});
+
+                    math::Vec3f const * samples[] = {&v1, &v2, &v3};
+                    for (std::size_t k = 0; k < 3; ++k) {
+                        GPUVisibilityTester::Ray ray;
+                        ray.origin = *samples[k];
+                        math::Vec3f dir = view_pos - ray.origin;
+                        ray.tmax = dir.norm();
+                        dir.normalize();
+                        ray.dir = dir;
+                        pending_rays.push_back(ray);
+                    }
+                }
+
+                if (!pending_face_ids.empty()) {
+                    std::vector<bool> occluded;
+                    bool ok = false;
+                    /* Serialize GPU API calls across OpenMP view threads --
+                     * simplest correct way to share one CUDA context from
+                     * many host threads. The work inside each call is still
+                     * fully parallel across the batch's rays on the device. */
+                    #pragma omp critical(mvstex_gpu_visibility)
+                    {
+                        ok = gpu_tester->test_occlusion(pending_rays, &occluded);
+                    }
+
+                    for (std::size_t p = 0; p < pending_face_ids.size(); ++p) {
+                        std::size_t face_id = pending_face_ids[p];
+                        DeferredFace const & g = pending_geom[p];
+
+                        bool visible = true;
+                        if (ok) {
+                            visible = !(occluded[3 * p] || occluded[3 * p + 1] || occluded[3 * p + 2]);
+                        } else {
+                            /* GPU batch failed -- fall back to the CPU BVH
+                             * for just this face's 3 rays, same logic as
+                             * the non-GPU path below. */
+                            math::Vec3f const * samples[] = {&g.v1, &g.v2, &g.v3};
+                            for (std::size_t k = 0; k < 3; ++k) {
+                                BVHTree::Ray ray;
+                                ray.origin = *samples[k];
+                                ray.dir = view_pos - ray.origin;
+                                ray.tmax = ray.dir.norm();
+                                ray.tmin = ray.tmax * 0.0001f;
+                                ray.dir.normalize();
+
+                                BVHTree::Hit hit;
+                                if (bvh_tree.intersect(ray, &hit)) {
+                                    visible = false;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!visible && !settings.nadir_mode) continue;
+
+                        finish_face(face_id, g.v1, g.v2, g.v3, g.face_to_view_vec, visible);
+                    }
+                }
+            } else
+#endif
+            {
             for (std::size_t i = 0; i < faces.size(); i += 3) {
                 std::size_t face_id = i / 3;
 
@@ -204,7 +377,7 @@ calculate_face_projection_infos(mve::TriangleMesh::ConstPtr mesh,
                    and 2.5D mode is enabled */
                 bool vertical = false;
                 if (settings.nadir_mode && fabs(up.dot(face_normal)) < 0.5) vertical = true;
-                
+
                 if (!vertical){
                     /* Backface and basic frustum culling */
                     float viewing_angle = face_to_view_vec.dot(face_normal);
@@ -222,7 +395,7 @@ calculate_face_projection_infos(mve::TriangleMesh::ConstPtr mesh,
                 bool visible = true;
                 if (!vertical && settings.geometric_visibility_test) {
                     /* Viewing rays do not collide? */
-                   
+
                     math::Vec3f const * samples[] = {&v1, &v2, &v3};
                     // TODO: random monte carlo samples...
 
@@ -243,34 +416,8 @@ calculate_face_projection_infos(mve::TriangleMesh::ConstPtr mesh,
                     if (!visible && !settings.nadir_mode) continue;
                 }
 
-                FaceProjectionInfo info = {j, 0.0f, math::Vec3f(0.0f, 0.0f, 0.0f)};
-
-                /* Calculate quality. */
-                if (texture_view->get_image()->get_type() == mve::IMAGE_TYPE_FLOAT){
-                    texture_view->get_face_info<float>(v1, v2, v3, &info, settings);
-                }else if (texture_view->get_image()->get_type() == mve::IMAGE_TYPE_UINT16){
-                    texture_view->get_face_info<uint16_t>(v1, v2, v3, &info, settings);
-                }else{
-                    texture_view->get_face_info<uint8_t>(v1, v2, v3, &info, settings);
-                }
-
-                if (info.quality == 0.0) continue;
-
-                if (settings.nadir_mode){
-                    float m1 = up.dot(face_to_view_vec);
-                    float m2 = up.dot(viewing_direction);
-                    float score = (m1*m1)*(m1*m1)*(m2*m2);
-                    if (!visible) info.quality = 1.0f * score;
-                    else{
-                        info.quality = std::max(1.0f, 10000.0f * score);
-                    }
-                }
-
-                /* Change color space. */
-                mve::image::color_rgb_to_ycbcr(*(info.mean_color));
-
-                std::pair<std::size_t, FaceProjectionInfo> pair(face_id, info);
-                projected_face_view_infos.push_back(pair);
+                finish_face(face_id, v1, v2, v3, face_to_view_vec, visible);
+            }
             }
 
             texture_view->release_image();

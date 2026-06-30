@@ -41,6 +41,14 @@ int main(int argc, char **argv) {
         std::exit(EXIT_FAILURE);
     }
 
+#ifndef MVSTEX_GPU
+    if (conf.settings.use_gpu) {
+        std::cerr << "Warning: --gpu was requested but this binary was not "
+            "built with MVSTEX_GPU; continuing on CPU." << std::endl;
+        conf.settings.use_gpu = false;
+    }
+#endif
+
     std::string const out_dir = util::fs::dirname(conf.out_prefix);
 
     if (!util::fs::dir_exists(out_dir.c_str())) {

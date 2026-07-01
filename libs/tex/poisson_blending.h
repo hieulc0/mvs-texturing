@@ -16,5 +16,16 @@ void
 poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
     mve::FloatImage::Ptr dest, float alpha);
 
+/* Diagnostic-only globals, see docs/gpu-accel-texturing.md §18/§19 --
+ * wall-clock time summed across all threads/calls, split by which part of
+ * poisson_blend() it was spent in, to find what actually dominates its
+ * cost (972ms of "Blending texture patches"' ~979ms of core-work per
+ * §17/§18) before changing anything about it. Not safe to *read* while
+ * any poisson_blend() call may still be in flight -- only meant to be
+ * read once every call for a given local_seam_leveling() run has
+ * finished. */
+extern double poisson_blend_build_time_sec;
+extern double poisson_blend_factorize_time_sec;
+extern double poisson_blend_solve_time_sec;
 
 #endif /* TEX_POISSONBLENDING_HEADER */

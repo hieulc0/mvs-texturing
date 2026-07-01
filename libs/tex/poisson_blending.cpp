@@ -11,12 +11,17 @@
 #include <iostream>
 
 #include <math/vector.h>
+#include <util/timer.h>
 #include <Eigen/SparseCore>
 #include <Eigen/SparseLU>
 
 #include "poisson_blending.h"
 
 typedef Eigen::SparseMatrix<float> SpMat;
+
+double poisson_blend_build_time_sec = 0.0;
+double poisson_blend_factorize_time_sec = 0.0;
+double poisson_blend_solve_time_sec = 0.0;
 
 math::Vec3f simple_laplacian(int i, mve::FloatImage::ConstPtr img){
     const int width = img->width();
@@ -60,6 +65,8 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
     const int width = dest->width();
     const int height = dest->height();
     const int channels = dest->channels();
+
+    util::WallTimer build_timer;
 
     mve::Image<int>::Ptr indices = mve::Image<int>::create(width, height, 1);
     indices->fill(-1);
@@ -119,9 +126,18 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
     SpMat A(nnz, nnz);
     A.setFromTriplets(coefficients_A.begin(), coefficients_A.end());
 
+    double build_elapsed = build_timer.get_elapsed_sec();
+    #pragma omp atomic
+    poisson_blend_build_time_sec += build_elapsed;
+
+    util::WallTimer factorize_timer;
     Eigen::SparseLU<SpMat, Eigen::COLAMDOrdering<int> > solver;
     solver.compute(A);
+    double factorize_elapsed = factorize_timer.get_elapsed_sec();
+    #pragma omp atomic
+    poisson_blend_factorize_time_sec += factorize_elapsed;
 
+    util::WallTimer solve_timer;
     for (int channel = 0; channel < channels; ++channel) {
         Eigen::VectorXf b(nnz);
         for (std::size_t i = 0; i < coefficients_b.size(); ++i)
@@ -135,4 +151,7 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
             if (index != -1) dest->at(i, channel) = x[index];
         }
     }
+    double solve_elapsed = solve_timer.get_elapsed_sec();
+    #pragma omp atomic
+    poisson_blend_solve_time_sec += solve_elapsed;
 }

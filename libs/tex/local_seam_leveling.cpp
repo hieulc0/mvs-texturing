@@ -270,6 +270,13 @@ local_seam_leveling(UniGraph const & graph, mve::TriangleMesh::ConstPtr mesh,
         << "s, prepare_blending_mask: " << time_prepare_mask_sec
         << "s, blend (poisson_blend): " << time_blend_sec
         << "s (summed across all threads/patches, not wall time)" << std::endl;
+    std::cout << "\t[timing] poisson_blend breakdown -- build: "
+        << poisson_blend_build_time_sec
+        << "s, factorize (SparseLU::compute): "
+        << poisson_blend_factorize_time_sec
+        << "s, solve+copyback (3 channels): "
+        << poisson_blend_solve_time_sec
+        << "s (summed across all threads/patches, not wall time)" << std::endl;
 }
 
 TEX_NAMESPACE_END

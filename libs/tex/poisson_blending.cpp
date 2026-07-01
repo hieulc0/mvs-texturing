@@ -9,11 +9,13 @@
 
 #include <cstdint>
 #include <iostream>
+#include <memory>
 
 #include <math/vector.h>
 #include <util/timer.h>
 #include <Eigen/SparseCore>
 #include <Eigen/SparseLU>
+#include <Eigen/IterativeLinearSolvers>
 
 #include "poisson_blending.h"
 
@@ -22,6 +24,13 @@ typedef Eigen::SparseMatrix<float> SpMat;
 double poisson_blend_build_time_sec = 0.0;
 double poisson_blend_factorize_time_sec = 0.0;
 double poisson_blend_solve_time_sec = 0.0;
+/* How often the exact SparseLU fallback below actually had to run --
+ * expected to stay near 0 given global_seam_leveling.cpp already trusts
+ * an iterative solver at the same tolerance for the analogous (much
+ * larger) global problem, but this is the first change in this file that
+ * isn't guaranteed bit-identical to the original, so it's worth knowing
+ * if it's firing a lot. See docs/gpu-accel-texturing.md §19-20. */
+long poisson_blend_fallback_count = 0;
 
 math::Vec3f simple_laplacian(int i, mve::FloatImage::ConstPtr img){
     const int width = img->width();
@@ -130,9 +139,49 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
     #pragma omp atomic
     poisson_blend_build_time_sec += build_elapsed;
 
+    /* A is not symmetric (interior/mask==255 rows reference their
+     * neighbours via the 5-point Laplacian stencil, including boundary
+     * neighbours, but boundary/mask==128|64 rows are pure identity
+     * constraints with no reference back) -- so this can't reuse
+     * Eigen::ConjugateGradient directly the way global_seam_leveling.cpp
+     * does for its own (symmetric, normal-equations) formulation of a
+     * similar problem. BiCGSTAB handles general square systems without
+     * that requirement.
+     *
+     * Per-patch Eigen::SparseLU (full reorder + symbolic + numeric
+     * factorization, computed fresh per patch -- 7680 patches on
+     * odm_sance) measured as 89.9% of poisson_blend's total time and
+     * ~60% of the entire texturing run (docs/gpu-accel-texturing.md
+     * §19). Iterative solving avoids that fixed per-call factorization
+     * cost entirely. Tolerance/iteration cap match
+     * global_seam_leveling.cpp's already-trusted values for the
+     * analogous global problem, which converges in ~100 iterations on a
+     * system three orders of magnitude larger than any single patch's
+     * border-strip system here.
+     *
+     * Not bit-identical to the previous SparseLU result -- an iterative
+     * solve only approximates to the given tolerance, unlike every prior
+     * fix in this codebase. Falls back to the exact SparseLU solve
+     * (lazily constructed, only paid for when actually needed) whenever
+     * BiCGSTAB fails to reach that tolerance, either for the whole
+     * system or for a specific channel's right-hand side, so correctness
+     * is never worse than before -- only performance is traded off in
+     * the (expected to be rare) fallback case. poisson_blend_fallback_count
+     * tracks how often that actually happens. */
     util::WallTimer factorize_timer;
-    Eigen::SparseLU<SpMat, Eigen::COLAMDOrdering<int> > solver;
-    solver.compute(A);
+    Eigen::BiCGSTAB<SpMat> iterative_solver;
+    iterative_solver.setMaxIterations(1000);
+    iterative_solver.setTolerance(0.0001);
+    iterative_solver.compute(A);
+    bool iterative_ready = (iterative_solver.info() == Eigen::Success);
+
+    std::unique_ptr<Eigen::SparseLU<SpMat, Eigen::COLAMDOrdering<int> > > exact_solver;
+    if (!iterative_ready) {
+        exact_solver.reset(new Eigen::SparseLU<SpMat, Eigen::COLAMDOrdering<int> >());
+        exact_solver->compute(A);
+        #pragma omp atomic
+        poisson_blend_fallback_count += 1;
+    }
     double factorize_elapsed = factorize_timer.get_elapsed_sec();
     #pragma omp atomic
     poisson_blend_factorize_time_sec += factorize_elapsed;
@@ -144,7 +193,18 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
             b[i] = coefficients_b[i][channel];
 
         Eigen::VectorXf x(n);
-        x = solver.solve(b);
+        if (iterative_ready) {
+            x = iterative_solver.solve(b);
+        }
+        if (!iterative_ready || iterative_solver.info() != Eigen::Success) {
+            if (!exact_solver) {
+                exact_solver.reset(new Eigen::SparseLU<SpMat, Eigen::COLAMDOrdering<int> >());
+                exact_solver->compute(A);
+                #pragma omp atomic
+                poisson_blend_fallback_count += 1;
+            }
+            x = exact_solver->solve(b);
+        }
 
         for (int i = 0; i < n; ++i) {
             int index = indices->at(i);

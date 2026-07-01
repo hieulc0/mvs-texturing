@@ -131,8 +131,20 @@ local_seam_leveling(UniGraph const & graph, mve::TriangleMesh::ConstPtr mesh,
 
     std::vector<std::vector<Line> > lines(texture_patches->size());
     std::vector<std::vector<Pixel> > pixels(texture_patches->size());
-    /* Sample edge colors. */
+
+    /* Sample edge colors. Computing edge_colors[i] only ever touches that
+     * edge's own slot and reads texture patch pixels (read-only, and
+     * TexturePatch::Ptr copies are safe to make concurrently -- shared_ptr
+     * refcounting is atomic), so it parallelizes with no locking needed.
+     * Building the per-patch `lines` buckets from the result is left as a
+     * second, serial pass instead of merging thread-local buffers: it's
+     * cheap bookkeeping (no texture sampling), not the expensive part. */
+    #pragma omp parallel for schedule(dynamic)
+#if !defined(_MSC_VER)
     for (std::size_t i = 0; i < edge_projection_infos.size(); ++i) {
+#else
+    for (std::int64_t i = 0; i < edge_projection_infos.size(); ++i) {
+#endif
         /* Determine sampling (ensure at least two samples per edge). */
         float max_length = 1;
         for (EdgeProjectionInfo const & edge_projection_info : edge_projection_infos[i]) {
@@ -146,7 +158,9 @@ local_seam_leveling(UniGraph const & graph, mve::TriangleMesh::ConstPtr mesh,
             float t = static_cast<float>(j) / (edge_color.size() - 1);
             edge_color[j] = mean_color_of_edge_point(edge_projection_infos[i], *texture_patches, t);
         }
+    }
 
+    for (std::size_t i = 0; i < edge_projection_infos.size(); ++i) {
         for (EdgeProjectionInfo const & edge_projection_info : edge_projection_infos[i]) {
             Line line;
             line.from = edge_projection_info.p1 + math::Vec2f(0.5f, 0.5f);
@@ -156,8 +170,18 @@ local_seam_leveling(UniGraph const & graph, mve::TriangleMesh::ConstPtr mesh,
         }
     }
 
-    /* Sample vertex colors. */
+    /* Sample vertex colors. Same split as above: the per-vertex weighted
+     * average only writes this vertex's own vertex_colors[i] slot plus a
+     * parallel validity flag (vertex_has_color[i]), so it parallelizes
+     * cleanly; building the per-patch `pixels` buckets is a second, cheap
+     * serial pass over the result instead of a locked merge. */
+    std::vector<uint8_t> vertex_has_color(vertex_colors.size(), 0);
+    #pragma omp parallel for schedule(dynamic)
+#if !defined(_MSC_VER)
     for (std::size_t i = 0; i < vertex_colors.size(); ++i) {
+#else
+    for (std::int64_t i = 0; i < vertex_colors.size(); ++i) {
+#endif
         std::vector<VertexProjectionInfo> const & projection_infos = vertex_projection_infos[i];
         if (projection_infos.size() <= 1) continue;
 
@@ -168,11 +192,15 @@ local_seam_leveling(UniGraph const & graph, mve::TriangleMesh::ConstPtr mesh,
             math::Vec3f color = texture_patch->get_pixel_value(projection_info.projection);
             color_accum.add(color, 1.0f);
         }
-	if (color_accum.w == 0.0f) continue;
+        if (color_accum.w == 0.0f) continue;
 
         vertex_colors[i] = color_accum.normalized();
+        vertex_has_color[i] = 1;
+    }
 
-        for (VertexProjectionInfo const & projection_info : projection_infos) {
+    for (std::size_t i = 0; i < vertex_colors.size(); ++i) {
+        if (!vertex_has_color[i]) continue;
+        for (VertexProjectionInfo const & projection_info : vertex_projection_infos[i]) {
             Pixel pixel;
             pixel.pos = math::Vec2i(projection_info.projection + math::Vec2f(0.5f, 0.5f));
             pixel.color = &vertex_colors[i];

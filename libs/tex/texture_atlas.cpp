@@ -8,6 +8,7 @@
  */
 
 #include <cstdio>
+#include <iostream>
 #include <map>
 
 #include <util/file_system.h>
@@ -328,10 +329,13 @@ TextureAtlas::apply_edge_padding<uint8_t>(bool use_gpu) {
             mask_ptr + static_cast<std::size_t>(width) * height);
 
         GPUEdgePadding gpu_padding(width, height, pixels, mask);
-        std::vector<uint8_t> result;
-        if (gpu_padding.available() && gpu_padding.run(padding, &result)) {
-            std::copy(result.begin(), result.end(), &img->at(0, 0));
-            return;
+        if (gpu_padding.available()) {
+            std::cout << "\tEdge padding GPU kernel ready." << std::endl;
+            std::vector<uint8_t> result;
+            if (gpu_padding.run(padding, &result)) {
+                std::copy(result.begin(), result.end(), &img->at(0, 0));
+                return;
+            }
         }
 
         std::fprintf(stderr,

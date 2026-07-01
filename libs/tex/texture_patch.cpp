@@ -7,8 +7,6 @@
  * of the BSD 3-Clause license. See the LICENSE.txt file for details.
  */
 
-#include <set>
-
 #include <math/functions.h>
 #include <mve/image_color.h>
 #include <mve/image_tools.h>
@@ -192,36 +190,50 @@ TexturePatch::blend(mve::FloatImage::ConstPtr orig) {
 }
 
 typedef std::vector<std::pair<int, int> > PixelVector;
-typedef std::set<std::pair<int, int> > PixelSet;
 
 void
 TexturePatch::prepare_blending_mask(std::size_t strip_width){
     int const width = blending_mask->width();
     int const height = blending_mask->height();
 
+    /* Flat frontier membership grid, replacing the previous std::set-based
+     * frontier -- same fix as TextureAtlas::apply_edge_padding (§13), but
+     * without adding any OpenMP here: this function already runs inside
+     * the per-patch #pragma omp parallel for in local_seam_leveling(), so
+     * this is purely a per-call constant-factor fix (O(1) membership
+     * tests instead of O(log n) red-black-tree operations), not a
+     * serial-to-parallel change -- nesting another parallel region inside
+     * an already-parallel one here would just add overhead for no gain. */
+    std::vector<uint8_t> in_border(static_cast<std::size_t>(width) * height, 0);
+
     /* Calculate the set of valid pixels at the border of texture patch. */
-    PixelSet valid_border_pixels;
+    PixelVector valid_border_pixels;
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             if (validity_mask->at(x, y, 0) == 0) continue;
 
             /* Valid border pixels need no invalid neighbours. */
             if (x == 0 || x == width - 1 || y == 0 || y == height - 1) {
-                valid_border_pixels.insert(std::pair<int, int>(x, y));
+                in_border[y * width + x] = 1;
+                valid_border_pixels.push_back(std::pair<int, int>(x, y));
                 continue;
             }
 
             /* Check the direct neighbourhood of all invalid pixels. */
-            for (int j = -1; j <= 1; ++j) {
-                for (int i = -1; i <= 1; ++i) {
+            bool is_border = false;
+            for (int j = -1; j <= 1 && !is_border; ++j) {
+                for (int i = -1; i <= 1 && !is_border; ++i) {
                     int nx = x + i;
                     int ny = y + j;
                     /* If the valid pixel has a invalid neighbour: */
                     if (validity_mask->at(nx, ny, 0) == 0) {
-                        /* Add the pixel to the set of valid border pixels. */
-                        valid_border_pixels.insert(std::pair<int, int>(x, y));
+                        is_border = true;
                     }
                 }
+            }
+            if (is_border) {
+                in_border[y * width + x] = 1;
+                valid_border_pixels.push_back(std::pair<int, int>(x, y));
             }
         }
     }
@@ -230,16 +242,19 @@ TexturePatch::prepare_blending_mask(std::size_t strip_width){
 
     /* Iteratively erode all border pixels. */
     for (std::size_t i = 0; i < strip_width; ++i) {
-        PixelVector new_invalid_pixels(valid_border_pixels.begin(), valid_border_pixels.end());
+        PixelVector new_invalid_pixels;
+        new_invalid_pixels.swap(valid_border_pixels);
         PixelVector::iterator it;
-        valid_border_pixels.clear();
 
-        /* Mark the new invalid pixels invalid in the validity mask. */
+        /* Mark the new invalid pixels invalid in the validity mask, and
+         * free their frontier-membership slots -- this round's frontier
+         * has now been fully consumed. */
         for (it = new_invalid_pixels.begin(); it != new_invalid_pixels.end(); ++it) {
              int x = it->first;
              int y = it->second;
 
              inner_pixel->at(x, y, 0) = 0;
+             in_border[y * width + x] = 0;
         }
 
         /* Calculate the set of valid pixels at the border of the valid area. */
@@ -253,9 +268,11 @@ TexturePatch::prepare_blending_mask(std::size_t strip_width){
                      int ny = y + j;
                      if (0 <= nx && nx < width &&
                          0 <= ny && ny < height &&
-                         inner_pixel->at(nx, ny, 0) == 255) {
+                         inner_pixel->at(nx, ny, 0) == 255 &&
+                         !in_border[ny * width + nx]) {
 
-                         valid_border_pixels.insert(std::pair<int, int>(nx, ny));
+                         in_border[ny * width + nx] = 1;
+                         valid_border_pixels.push_back(std::pair<int, int>(nx, ny));
                      }
                  }
              }
@@ -287,8 +304,7 @@ TexturePatch::prepare_blending_mask(std::size_t strip_width){
     }
 
     /* Mark all border pixels. */
-    PixelSet::iterator it;
-    for (it = valid_border_pixels.begin(); it != valid_border_pixels.end(); ++it) {
+    for (PixelVector::iterator it = valid_border_pixels.begin(); it != valid_border_pixels.end(); ++it) {
          int x = it->first;
          int y = it->second;
 

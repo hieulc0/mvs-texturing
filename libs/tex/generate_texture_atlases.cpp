@@ -153,7 +153,7 @@ generate_texture_atlases(std::vector<TexturePatch::Ptr> * orig_texture_patches,
 // #if !defined(_MSC_VER)
 //         #pragma omp task
 // #endif
-        texture_atlas->finalize();
+        texture_atlas->finalize(settings.use_gpu);
     }
 
     std::cout << "\r\tWorking on atlas " << texture_atlases->size()

@@ -7,6 +7,7 @@
  * of the BSD 3-Clause license. See the LICENSE.txt file for details.
  */
 
+#include <cstdint>
 #include <fstream>
 #include <cstring>
 #include <cerrno>
@@ -45,7 +46,17 @@ MaterialLib::save_to_files(std::string const & prefix) const {
     }
     out.close();
 
-    for (Material const & material : *this) {
+    /* Each material's map is an independent file; encoding (PNG/TIFF) rather
+     * than disk I/O dominates this loop, so it parallelizes across cores
+     * with no shared state between iterations. */
+    std::size_t const num_materials = this->size();
+    #pragma omp parallel for schedule(dynamic)
+#if !defined(_MSC_VER)
+    for (std::size_t m = 0; m < num_materials; ++m) {
+#else
+    for (std::int64_t m = 0; m < num_materials; ++m) {
+#endif
+        Material const & material = this->at(m);
         std::string filename = prefix + "_" + material.name + "_map_Kd";
         if (material.diffuse_map->get_type() == mve::IMAGE_TYPE_FLOAT){
             mve::image::save_tiff_float_file(std::dynamic_pointer_cast<mve::FloatImage>(material.diffuse_map), filename + ".tif");

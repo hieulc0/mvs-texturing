@@ -7,7 +7,7 @@
  * of the BSD 3-Clause license. See the LICENSE.txt file for details.
  */
 
-#include <set>
+#include <cstdio>
 #include <map>
 
 #include <util/file_system.h>
@@ -15,6 +15,10 @@
 #include <mve/image_io.h>
 
 #include "texture_atlas.h"
+
+#ifdef MVSTEX_GPU
+#include "cuda/edge_padding_gpu.h"
+#endif
 
 
 TextureAtlas::TextureAtlas(unsigned int size, mve::ImageType type, bool grayscale) :
@@ -77,7 +81,6 @@ float_to_raw_image (mve::FloatImage::ConstPtr image, float vmin, float vmax)
 }
 
 typedef std::vector<std::pair<int, int> > PixelVector;
-typedef std::set<std::pair<int, int> > PixelSet;
 
 bool
 TextureAtlas::insert(TexturePatch::ConstPtr texture_patch) {
@@ -137,7 +140,14 @@ TextureAtlas::insert(TexturePatch::ConstPtr texture_patch) {
 
 template <typename T>
 void
-TextureAtlas::apply_edge_padding(void) {
+TextureAtlas::apply_edge_padding(bool use_gpu) {
+    (void) use_gpu; /* GPU path only exists for the uint8_t specialization below. */
+    this->apply_edge_padding_cpu<T>();
+}
+
+template <typename T>
+void
+TextureAtlas::apply_edge_padding_cpu(void) {
     assert(image != NULL);
     assert(validity_mask != NULL);
 
@@ -151,73 +161,113 @@ TextureAtlas::apply_edge_padding(void) {
     gauss[6] = 1.0f; gauss[7] = 2.0f; gauss[8] = 1.0f;
     gauss /= 16.0f;
 
-    /* Calculate the set of invalid pixels at the border of texture patches. */
-    PixelSet invalid_border_pixels;
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            if (validity_mask->at(x, y, 0) == 255) continue;
+    /* Calculate the set of invalid pixels at the border of texture patches.
+     * Rows are independent (each pixel is visited by exactly one thread),
+     * so this scan is safe to parallelize; each thread accumulates locally
+     * and merges once to avoid contending on a shared container. */
+    PixelVector invalid_border_pixels;
+    #pragma omp parallel
+    {
+        PixelVector local_border_pixels;
+        #pragma omp for schedule(static) nowait
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                if (validity_mask->at(x, y, 0) == 255) continue;
 
-            /* Check the direct neighbourhood of all invalid pixels. */
-            for (int j = -1; j <= 1; ++j) {
-                for (int i = -1; i <= 1; ++i) {
-                    int nx = x + i;
-                    int ny = y + j;
-                    /* If the invalid pixel has a valid neighbour: */
-                    if (0 <= nx && nx < width &&
-                        0 <= ny && ny < height &&
-                        validity_mask->at(nx, ny, 0) == 255) {
-
-                        /* Add the pixel to the set of invalid border pixels. */
-                        invalid_border_pixels.insert(std::pair<int, int>(x, y));
+                /* Check the direct neighbourhood of all invalid pixels. */
+                bool is_border = false;
+                for (int j = -1; j <= 1 && !is_border; ++j) {
+                    for (int i = -1; i <= 1 && !is_border; ++i) {
+                        int nx = x + i;
+                        int ny = y + j;
+                        /* If the invalid pixel has a valid neighbour: */
+                        if (0 <= nx && nx < width &&
+                            0 <= ny && ny < height &&
+                            validity_mask->at(nx, ny, 0) == 255) {
+                            is_border = true;
+                        }
                     }
+                }
+                if (is_border) {
+                    local_border_pixels.push_back(std::pair<int, int>(x, y));
                 }
             }
         }
+        #pragma omp critical
+        invalid_border_pixels.insert(invalid_border_pixels.end(),
+            local_border_pixels.begin(), local_border_pixels.end());
     }
 
     mve::ByteImage::Ptr new_validity_mask = validity_mask->duplicate();
+
+    /* Flat frontier membership grid, replacing the previous std::set-based
+     * frontier: this loop runs `padding` times over a border that can span
+     * a large fraction of a multi-thousand-pixel atlas, so O(1) membership
+     * tests matter more here than in most call sites. Only entries actually
+     * touched by the current frontier are set/cleared each round, so this
+     * stays proportional to frontier size, not image size. */
+    std::vector<uint8_t> in_frontier(static_cast<std::size_t>(width) * height, 0);
+    for (std::pair<int, int> const & p : invalid_border_pixels) {
+        in_frontier[p.second * width + p.first] = 1;
+    }
 
     /* Iteratively dilate border pixels until padding constants are reached. */
     for (unsigned int n = 0; n <= padding; ++n) {
         PixelVector new_valid_pixels;
 
-        PixelSet::iterator it = invalid_border_pixels.begin();
-        for (;it != invalid_border_pixels.end(); it++) {
-            int x = it->first;
-            int y = it->second;
+        /* Each frontier pixel only writes its own image pixel and only
+         * reads `new_validity_mask`, which this round doesn't mutate until
+         * after this loop -- safe to parallelize without locks. */
+        #pragma omp parallel
+        {
+            PixelVector local_valid_pixels;
+            #pragma omp for schedule(dynamic) nowait
+            for (std::size_t idx = 0; idx < invalid_border_pixels.size(); ++idx) {
+                int x = invalid_border_pixels[idx].first;
+                int y = invalid_border_pixels[idx].second;
 
-            bool now_valid = false;
-            /* Calculate new pixel value. */
-            for (int c = 0; c < 3; ++c) {
-                float norm = 0.0f;
-                float value = 0.0f;
-                for (int j = -1; j <= 1; ++j) {
-                    for (int i = -1; i <= 1; ++i) {
-                        int nx = x + i;
-                        int ny = y + j;
-                        if (0 <= nx && nx < width &&
-                            0 <= ny && ny < height &&
-                            new_validity_mask->at(nx, ny, 0) == 255) {
+                bool now_valid = false;
+                /* Calculate new pixel value. */
+                for (int c = 0; c < 3; ++c) {
+                    float norm = 0.0f;
+                    float value = 0.0f;
+                    for (int j = -1; j <= 1; ++j) {
+                        for (int i = -1; i <= 1; ++i) {
+                            int nx = x + i;
+                            int ny = y + j;
+                            if (0 <= nx && nx < width &&
+                                0 <= ny && ny < height &&
+                                new_validity_mask->at(nx, ny, 0) == 255) {
 
-                            float w = gauss[(j + 1) * 3 + (i + 1)];
-                            norm += w;
-                            value += (img->at(nx, ny, c) / 255.0f) * w;
+                                float w = gauss[(j + 1) * 3 + (i + 1)];
+                                norm += w;
+                                value += (img->at(nx, ny, c) / 255.0f) * w;
+                            }
                         }
                     }
+
+                    if (norm == 0.0f)
+                        continue;
+
+                    now_valid = true;
+                    img->at(x, y, c) = (value / norm) * 255.0f;
                 }
 
-                if (norm == 0.0f)
-                    continue;
-
-                now_valid = true;
-                img->at(x, y, c) = (value / norm) * 255.0f;
+                if (now_valid) {
+                    local_valid_pixels.push_back(invalid_border_pixels[idx]);
+                }
             }
-
-            if (now_valid) {
-                new_valid_pixels.push_back(*it);
-            }
+            #pragma omp critical
+            new_valid_pixels.insert(new_valid_pixels.end(),
+                local_valid_pixels.begin(), local_valid_pixels.end());
         }
 
+        /* This frontier has been fully consumed (turned into new_valid_pixels
+         * or left permanently invalid); free its membership slots before
+         * computing the next round's frontier. */
+        for (std::pair<int, int> const & p : invalid_border_pixels) {
+            in_frontier[p.second * width + p.first] = 0;
+        }
         invalid_border_pixels.clear();
 
         /* Mark the new valid pixels valid in the validity mask. */
@@ -228,7 +278,11 @@ TextureAtlas::apply_edge_padding(void) {
              new_validity_mask->at(x, y, 0) = 255;
         }
 
-        /* Calculate the set of invalid pixels at the border of the valid area. */
+        /* Calculate the set of invalid pixels at the border of the valid
+         * area. Kept single-threaded: it's neighbor bookkeeping only (no
+         * float math), much cheaper than the pass above, and two
+         * new_valid_pixels can share an invalid neighbour, so deduping via
+         * `in_frontier` needs to be serialized anyway. */
         for (std::size_t i = 0; i < new_valid_pixels.size(); ++i) {
             int x = new_valid_pixels[i].first;
             int y = new_valid_pixels[i].second;
@@ -239,15 +293,55 @@ TextureAtlas::apply_edge_padding(void) {
                      int ny = y + j;
                      if (0 <= nx && nx < width &&
                          0 <= ny && ny < height &&
-                         new_validity_mask->at(nx, ny, 0) == 0) {
+                         new_validity_mask->at(nx, ny, 0) == 0 &&
+                         !in_frontier[ny * width + nx]) {
 
-                         invalid_border_pixels.insert(std::pair<int, int>(nx, ny));
+                         in_frontier[ny * width + nx] = 1;
+                         invalid_border_pixels.push_back(std::pair<int, int>(nx, ny));
                     }
                 }
             }
         }
     }
 }
+
+#ifdef MVSTEX_GPU
+/* Only the byte-atlas path is ported to GPU (see edge_padding_gpu.h for
+ * why); float/uint16_t atlases keep using the generic template above,
+ * which always takes the CPU path regardless of use_gpu. */
+template <>
+void
+TextureAtlas::apply_edge_padding<uint8_t>(bool use_gpu) {
+    assert(image != NULL);
+    assert(validity_mask != NULL);
+
+    if (use_gpu) {
+        mve::ByteImage::Ptr img = std::dynamic_pointer_cast<mve::ByteImage>(image);
+        int const width = img->width();
+        int const height = img->height();
+
+        uint8_t const * pixel_ptr = &img->at(0, 0);
+        std::vector<uint8_t> pixels(pixel_ptr,
+            pixel_ptr + static_cast<std::size_t>(width) * height * 3);
+        uint8_t const * mask_ptr = &validity_mask->at(0, 0);
+        std::vector<uint8_t> mask(mask_ptr,
+            mask_ptr + static_cast<std::size_t>(width) * height);
+
+        GPUEdgePadding gpu_padding(width, height, pixels, mask);
+        std::vector<uint8_t> result;
+        if (gpu_padding.available() && gpu_padding.run(padding, &result)) {
+            std::copy(result.begin(), result.end(), &img->at(0, 0));
+            return;
+        }
+
+        std::fprintf(stderr,
+            "[mvstex GPU] edge padding GPU path unavailable/failed, "
+            "falling back to CPU\n");
+    }
+
+    this->apply_edge_padding_cpu<uint8_t>();
+}
+#endif
 
 struct VectorCompare {
     bool operator()(math::Vec2f const & lhs, math::Vec2f const & rhs) const {
@@ -277,18 +371,18 @@ TextureAtlas::merge_texcoords() {
 }
 
 void
-TextureAtlas::finalize() {
+TextureAtlas::finalize(bool use_gpu) {
     if (finalized) {
         throw util::Exception("TextureAtlas already finalized");
     }
 
     this->bin.reset();
     if (image->get_type() == mve::IMAGE_TYPE_FLOAT){
-        this->apply_edge_padding<float>();
+        this->apply_edge_padding<float>(use_gpu);
     }else if (image->get_type() == mve::IMAGE_TYPE_UINT16){
-        this->apply_edge_padding<uint16_t>();
+        this->apply_edge_padding<uint16_t>(use_gpu);
     }else{
-        this->apply_edge_padding<uint8_t>();
+        this->apply_edge_padding<uint8_t>(use_gpu);
     }
     this->validity_mask.reset();
     this->merge_texcoords();

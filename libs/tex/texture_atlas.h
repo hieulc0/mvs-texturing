@@ -49,7 +49,10 @@ class TextureAtlas {
         RectangularBin::Ptr bin;
 
         template <typename T>
-        void apply_edge_padding(void);
+        void apply_edge_padding(bool use_gpu);
+
+        template <typename T>
+        void apply_edge_padding_cpu(void);
 
         void merge_texcoords(void);
 
@@ -65,7 +68,10 @@ class TextureAtlas {
 
         bool insert(TexturePatch::ConstPtr texture_patch);
 
-        void finalize(void);
+        /* `use_gpu` only takes effect for byte (8-bit PNG) atlases built
+         * with MVSTEX_GPU -- see apply_edge_padding's uint8_t specialization
+         * in texture_atlas.cpp. Ignored (and safe to pass) otherwise. */
+        void finalize(bool use_gpu = false);
         bool is_grayscale();
 };
 

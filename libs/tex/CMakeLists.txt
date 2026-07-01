@@ -4,6 +4,8 @@ file (GLOB SOURCES "[^_]*.cpp")
 if(MVSTEX_GPU)
     list(APPEND SOURCES cuda/visibility_kernel.cu)
     list(APPEND HEADERS cuda/visibility_gpu.h)
+    list(APPEND SOURCES cuda/edge_padding_kernel.cu)
+    list(APPEND HEADERS cuda/edge_padding_gpu.h)
 endif()
 
 set(LIBRARY tex)

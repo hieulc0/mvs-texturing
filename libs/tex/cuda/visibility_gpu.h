@@ -18,7 +18,7 @@
 #include <math/vector.h>
 #include <acc/bvh_tree.h>
 
-#include "defines.h"
+#include "../defines.h"
 
 TEX_NAMESPACE_BEGIN
 

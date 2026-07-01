@@ -7,7 +7,10 @@
  * of the BSD 3-Clause license. See the LICENSE.txt file for details.
  */
 
+#include <iostream>
+
 #include <math/accum.h>
+#include <util/timer.h>
 
 #include "progress_counter.h"
 #include "texturing.h"
@@ -208,6 +211,17 @@ local_seam_leveling(UniGraph const & graph, mve::TriangleMesh::ConstPtr mesh,
         }
     }
 
+    /* Diagnostic-only timing, summed across all threads/patches -- not
+     * behavior, just answering "where does 'Running local seam leveling'
+     * actually go" after two parallelization fixes here (see
+     * docs/gpu-accel-texturing.md §17) both turned out not to move that
+     * phase's total time. Plain doubles + #pragma omp atomic rather than
+     * std::atomic<double>, since fetch_add on floating-point atomics isn't
+     * available until C++20 and this project targets C++11. */
+    double time_draw_pixels_sec = 0.0;
+    double time_prepare_mask_sec = 0.0;
+    double time_blend_sec = 0.0;
+
     ProgressCounter texture_patch_counter("\tBlending texture patches", texture_patches->size());
     #pragma omp parallel for schedule(dynamic)
 #if !defined(_MSC_VER)
@@ -218,6 +232,7 @@ local_seam_leveling(UniGraph const & graph, mve::TriangleMesh::ConstPtr mesh,
         TexturePatch::Ptr texture_patch = texture_patches->at(i);
         mve::FloatImage::Ptr image = texture_patch->get_image()->duplicate();
 
+        util::WallTimer draw_timer;
         /* Apply colors. */
         for (Pixel const & pixel : pixels[i]) {
             texture_patch->set_pixel_value(pixel.pos, *pixel.color);
@@ -226,18 +241,35 @@ local_seam_leveling(UniGraph const & graph, mve::TriangleMesh::ConstPtr mesh,
         for (Line const & line : lines[i]) {
             draw_line(line.from, line.to, *line.color, texture_patch);
         }
+        double draw_elapsed = draw_timer.get_elapsed_sec();
+        #pragma omp atomic
+        time_draw_pixels_sec += draw_elapsed;
 
         texture_patch_counter.progress<SIMPLE>();
 
         /* Only alter a small strip of texture patches originating from input images. */
+        util::WallTimer prepare_mask_timer;
         if (texture_patch->get_label() != 0) {
             texture_patch->prepare_blending_mask(STRIP_SIZE);
         }
+        double prepare_mask_elapsed = prepare_mask_timer.get_elapsed_sec();
+        #pragma omp atomic
+        time_prepare_mask_sec += prepare_mask_elapsed;
 
+        util::WallTimer blend_timer;
         texture_patch->blend(image);
+        double blend_elapsed = blend_timer.get_elapsed_sec();
+        #pragma omp atomic
+        time_blend_sec += blend_elapsed;
+
         texture_patch->release_blending_mask();
         texture_patch_counter.inc();
     }
+
+    std::cout << "\t[timing] draw/pixels: " << time_draw_pixels_sec
+        << "s, prepare_blending_mask: " << time_prepare_mask_sec
+        << "s, blend (poisson_blend): " << time_blend_sec
+        << "s (summed across all threads/patches, not wall time)" << std::endl;
 }
 
 TEX_NAMESPACE_END

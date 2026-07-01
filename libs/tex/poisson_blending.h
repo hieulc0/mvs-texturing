@@ -28,9 +28,4 @@ extern double poisson_blend_build_time_sec;
 extern double poisson_blend_factorize_time_sec;
 extern double poisson_blend_solve_time_sec;
 
-/* How many times poisson_blend() fell back from the iterative BiCGSTAB
- * solve to the exact SparseLU one (see docs/gpu-accel-texturing.md
- * §19-20) -- expected to stay near 0. */
-extern long poisson_blend_fallback_count;
-
 #endif /* TEX_POISSONBLENDING_HEADER */

@@ -328,7 +328,7 @@ TextureAtlas::apply_edge_padding<uint8_t>(bool use_gpu) {
         std::vector<uint8_t> mask(mask_ptr,
             mask_ptr + static_cast<std::size_t>(width) * height);
 
-        GPUEdgePadding gpu_padding(width, height, pixels, mask);
+        tex::GPUEdgePadding gpu_padding(width, height, pixels, mask);
         if (gpu_padding.available()) {
             std::cout << "\tEdge padding GPU kernel ready." << std::endl;
             std::vector<uint8_t> result;

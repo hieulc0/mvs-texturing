@@ -22,6 +22,9 @@ typedef Eigen::SparseMatrix<float> SpMat;
 double poisson_blend_build_time_sec = 0.0;
 double poisson_blend_factorize_time_sec = 0.0;
 double poisson_blend_solve_time_sec = 0.0;
+long long poisson_blend_nnz_full_total = 0;
+long long poisson_blend_nnz_interior_total = 0;
+long long poisson_blend_call_count = 0;
 
 math::Vec3f simple_laplacian(int i, mve::FloatImage::ConstPtr img){
     const int width = img->width();
@@ -71,10 +74,12 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
     mve::Image<int>::Ptr indices = mve::Image<int>::create(width, height, 1);
     indices->fill(-1);
     int index = 0;
+    int nnz_interior = 0;
     for (int i = 0; i < n; ++i) {
         if (mask->at(i) != 0) {
             indices->at(i) = index;
             index += 1;
+            if (mask->at(i) == 255) nnz_interior += 1;
         }
     }
     const int nnz = index;
@@ -129,6 +134,12 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
     double build_elapsed = build_timer.get_elapsed_sec();
     #pragma omp atomic
     poisson_blend_build_time_sec += build_elapsed;
+    #pragma omp atomic
+    poisson_blend_nnz_full_total += nnz;
+    #pragma omp atomic
+    poisson_blend_nnz_interior_total += nnz_interior;
+    #pragma omp atomic
+    poisson_blend_call_count += 1;
 
     util::WallTimer factorize_timer;
     Eigen::SparseLU<SpMat, Eigen::COLAMDOrdering<int> > solver;

@@ -28,4 +28,16 @@ extern double poisson_blend_build_time_sec;
 extern double poisson_blend_factorize_time_sec;
 extern double poisson_blend_solve_time_sec;
 
+/* nnz instrumentation, see docs/gpu-accel-texturing.md §28/§29 -- before
+ * re-attempting the §23 Dirichlet-elimination reformulation (paired with
+ * a license-safe solver this time), measure how much it would actually
+ * shrink the system on real data instead of assuming. `_full` is the
+ * current mixed system's size (mask!=0, i.e. what's factorized today);
+ * `_interior` is what the reformulated system would be (mask==255 only).
+ * Summed across all threads/calls, same read-after-run-only caveat as
+ * the timing globals above. */
+extern long long poisson_blend_nnz_full_total;
+extern long long poisson_blend_nnz_interior_total;
+extern long long poisson_blend_call_count;
+
 #endif /* TEX_POISSONBLENDING_HEADER */

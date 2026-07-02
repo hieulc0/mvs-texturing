@@ -277,6 +277,16 @@ local_seam_leveling(UniGraph const & graph, mve::TriangleMesh::ConstPtr mesh,
         << "s, solve+copyback (3 channels): "
         << poisson_blend_solve_time_sec
         << "s (summed across all threads/patches, not wall time)" << std::endl;
+    double nnz_shrink_pct = poisson_blend_nnz_full_total > 0
+        ? 100.0 * (1.0 - static_cast<double>(poisson_blend_nnz_interior_total)
+            / static_cast<double>(poisson_blend_nnz_full_total))
+        : 0.0;
+    std::cout << "\t[timing] poisson_blend nnz -- full (mask!=0) total: "
+        << poisson_blend_nnz_full_total
+        << ", interior-only (mask==255) total: "
+        << poisson_blend_nnz_interior_total
+        << ", calls: " << poisson_blend_call_count
+        << ", would-be shrink: " << nnz_shrink_pct << "%" << std::endl;
 }
 
 TEX_NAMESPACE_END

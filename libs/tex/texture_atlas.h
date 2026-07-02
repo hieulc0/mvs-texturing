@@ -66,6 +66,24 @@ class TextureAtlas {
         Texcoords const & get_texcoords(void) const;
         mve::ImageBase::Ptr get_image(void) const;
 
+        /* Serial bin-fit decision only -- must be called in placement order
+         * within a given atlas, since each call depends on every prior
+         * placement. On success, fills *rect with the placed position and
+         * returns true; the caller must then call commit() with the same
+         * rect to actually write the patch's pixels/bookkeeping. See
+         * docs/gpu-accel-texturing.md §33 Track A. */
+        bool try_place(TexturePatch::ConstPtr texture_patch, Rect<int> * rect);
+
+        /* The copy_into pixel copies + faces/texcoords bookkeeping half of
+         * the old insert(). Writes to a disjoint image region per call (safe
+         * to run concurrently across patches), but appends to the shared
+         * faces/texcoords vectors under a critical section. Safe to call
+         * from an `#pragma omp parallel for` once try_place() has already
+         * reserved rect for this patch. */
+        void commit(TexturePatch::ConstPtr texture_patch, Rect<int> const & rect);
+
+        /* Thin serial wrapper: try_place() + commit(). Kept for callers that
+         * don't need the parallel commit split. */
         bool insert(TexturePatch::ConstPtr texture_patch);
 
         /* `use_gpu` only takes effect for byte (8-bit PNG) atlases built
@@ -75,18 +93,18 @@ class TextureAtlas {
         bool is_grayscale();
 };
 
-/* Diagnostic-only globals, see docs/gpu-accel-texturing.md §31 --
- * wall-clock time summed across all TextureAtlas::insert() calls, split
- * between the serial bin-packing decision (RectangularBin::insert, which
- * must stay serial -- each call depends on every prior placement in the
- * same atlas) and the pixel-copy + bookkeeping work (copy_into calls +
+/* Diagnostic-only globals, see docs/gpu-accel-texturing.md §31/§33 --
+ * wall-clock time summed across all TextureAtlas::try_place()/commit()
+ * calls (formerly two phases of a single insert()), split between the
+ * serial bin-packing decision (RectangularBin::insert, which must stay
+ * serial -- each call depends on every prior placement in the same
+ * atlas) and the pixel-copy + bookkeeping work (copy_into calls +
  * faces/texcoords bookkeeping, which write to disjoint per-patch regions
- * and are a parallelization candidate). Sizes whether that split is
- * worth an API change before doing it. Plain += is safe today because
- * the insert loop in generate_texture_atlases.cpp is still
- * single-threaded -- would need #pragma omp atomic if/when that
- * changes. Not safe to *read* while any insert() call may still be in
- * flight. */
+ * and are parallelized via commit() as of §33 Track A). The bin-fit timer
+ * is only ever updated from the serial placement loop, so plain += stays
+ * safe there; the copy+bookkeeping timer is now updated from parallel
+ * commit() calls, so it uses #pragma omp atomic. Not safe to *read*
+ * while any try_place()/commit() call may still be in flight. */
 extern double atlas_insert_binfit_time_sec;
 extern double atlas_insert_copy_time_sec;
 

@@ -130,7 +130,12 @@ generate_texture_atlases(std::vector<TexturePatch::Ptr> * orig_texture_patches,
         texture_atlases->push_back(TextureAtlas::create(texture_size, type, grayscale));
         TextureAtlas::Ptr texture_atlas = texture_atlases->back();
 
-        /* Try to insert each of the texture patches into the texture atlas. */
+        /* Bin-fit decision must stay serial (each try_place() depends on
+         * every prior placement in this atlas), so this pass only collects
+         * (patch, rect) pairs -- the actual pixel copy + bookkeeping is
+         * deferred to a parallel commit() pass below. See
+         * docs/gpu-accel-texturing.md §33 Track A. */
+        std::vector<std::pair<TexturePatch::ConstPtr, Rect<int> > > placed_patches;
         std::list<TexturePatch::ConstPtr>::iterator it = texture_patches.begin();
         for (; it != texture_patches.end();) {
             std::size_t done_patches = total_num_patches - remaining_patches;
@@ -143,13 +148,21 @@ generate_texture_atlases(std::vector<TexturePatch::Ptr> * orig_texture_patches,
                  << precent << "%... " << std::flush;
             }
 
-            if (texture_atlas->insert(*it)) {
+            Rect<int> rect;
+            if (texture_atlas->try_place(*it, &rect)) {
+                placed_patches.push_back(std::make_pair(*it, rect));
                 it = texture_patches.erase(it);
                 remaining_patches -= 1;
             } else {
                 ++it;
             }
         }
+
+        #pragma omp parallel for schedule(dynamic)
+        for (std::size_t i = 0; i < placed_patches.size(); ++i) {
+            texture_atlas->commit(placed_patches[i].first, placed_patches[i].second);
+        }
+
 // #if !defined(_MSC_VER)
 //         #pragma omp task
 // #endif

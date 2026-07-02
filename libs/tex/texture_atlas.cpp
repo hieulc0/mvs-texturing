@@ -88,26 +88,29 @@ float_to_raw_image (mve::FloatImage::ConstPtr image, float vmin, float vmax)
 typedef std::vector<std::pair<int, int> > PixelVector;
 
 bool
-TextureAtlas::insert(TexturePatch::ConstPtr texture_patch) {
+TextureAtlas::try_place(TexturePatch::ConstPtr texture_patch, Rect<int> * rect) {
     if (finalized) {
         throw util::Exception("No insertion possible, TextureAtlas already finalized");
     }
 
     assert(bin != NULL);
-    assert(validity_mask != NULL);
 
     int const width = texture_patch->get_width() + 2 * padding;
     int const height = texture_patch->get_height() + 2 * padding;
-    Rect<int> rect(0, 0, width, height);
+    *rect = Rect<int>(0, 0, width, height);
     util::WallTimer binfit_timer;
-    bool const placed = bin->insert(&rect);
+    bool const placed = bin->insert(rect);
     atlas_insert_binfit_time_sec += binfit_timer.get_elapsed_sec();
-    if (!placed) return false;
+    return placed;
+}
+
+void
+TextureAtlas::commit(TexturePatch::ConstPtr texture_patch, Rect<int> const & rect) {
+    assert(validity_mask != NULL);
 
     util::WallTimer copy_timer;
 
     /* Update texture atlas and its validity mask. */
-
 
     if (image->get_type() == mve::IMAGE_TYPE_FLOAT){
         copy_into<float>(texture_patch->get_image(), rect.min_x, rect.min_y, std::dynamic_pointer_cast<mve::FloatImage>(image), padding);
@@ -130,9 +133,11 @@ TextureAtlas::insert(TexturePatch::ConstPtr texture_patch) {
     /* Calculate the offset of the texture patches' relative texture coordinates */
     math::Vec2f offset = math::Vec2f(rect.min_x + padding, rect.min_y + padding);
 
-    faces.insert(faces.end(), patch_faces.begin(), patch_faces.end());
-
-    /* Calculate the final textcoords of the faces. */
+    /* Calculate the final texcoords of the faces into a local buffer first,
+     * so only the append below (not this per-vertex math) needs to be
+     * serialized across concurrent commit() calls. */
+    Texcoords local_texcoords;
+    local_texcoords.reserve(patch_faces.size() * 3);
     for (std::size_t i = 0; i < patch_faces.size(); ++i) {
         for (int j = 0; j < 3; ++j) {
             math::Vec2f rel_texcoord(patch_texcoords[i * 3 + j]);
@@ -140,10 +145,26 @@ TextureAtlas::insert(TexturePatch::ConstPtr texture_patch) {
 
             texcoord[0] = texcoord[0] / this->size;
             texcoord[1] = texcoord[1] / this->size;
-            texcoords.push_back(texcoord);
+            local_texcoords.push_back(texcoord);
         }
     }
-    atlas_insert_copy_time_sec += copy_timer.get_elapsed_sec();
+
+    #pragma omp critical (texture_atlas_commit_bookkeeping)
+    {
+        faces.insert(faces.end(), patch_faces.begin(), patch_faces.end());
+        texcoords.insert(texcoords.end(), local_texcoords.begin(), local_texcoords.end());
+    }
+
+    double const copy_elapsed = copy_timer.get_elapsed_sec();
+    #pragma omp atomic
+    atlas_insert_copy_time_sec += copy_elapsed;
+}
+
+bool
+TextureAtlas::insert(TexturePatch::ConstPtr texture_patch) {
+    Rect<int> rect(0, 0, 0, 0);
+    if (!try_place(texture_patch, &rect)) return false;
+    commit(texture_patch, rect);
     return true;
 }
 

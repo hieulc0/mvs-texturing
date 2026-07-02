@@ -14,7 +14,7 @@
 #include <math/vector.h>
 #include <util/timer.h>
 #include <Eigen/SparseCore>
-#include <Eigen/IterativeLinearSolvers>
+#include <Eigen/SparseCholesky>
 #include <Eigen/SparseLU>
 
 #include "poisson_blending.h"
@@ -24,8 +24,7 @@ typedef Eigen::SparseMatrix<float> SpMat;
 double poisson_blend_build_time_sec = 0.0;
 double poisson_blend_factorize_time_sec = 0.0;
 double poisson_blend_solve_time_sec = 0.0;
-double poisson_blend_cg_iterations = 0.0;
-double poisson_blend_cg_fallback_count = 0.0;
+double poisson_blend_fallback_count = 0.0;
 
 math::Vec3f simple_laplacian(int i, mve::FloatImage::ConstPtr img){
     const int width = img->width();
@@ -80,11 +79,18 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
      * interior (mask==255) rows' RHS leaves a system over interior pixels
      * only, whose matrix is the discrete Laplacian's negation: this is
      * symmetric positive definite (unlike the original mixed system,
-     * which is non-symmetric), so it can be solved with a real
-     * Eigen::ConjugateGradient instead of a general non-symmetric
-     * iterative method. That's the reason the earlier BiCGSTAB swap
-     * (§20/§21) converged badly on the un-reformulated matrix -- it had
-     * no symmetry to exploit. */
+     * which is non-symmetric). A first attempt solved this with
+     * Eigen::ConjugateGradient -- mathematically valid and converged in
+     * ~70 iterations/solve (not near the iteration cap), but measured
+     * ~27x slower per solve than SparseLU regardless (§25): with ~7700
+     * patches x 3 channels of genuinely tiny systems, SparseLU's shape
+     * (one factorization reused cheaply across 3 channel solves) beats
+     * any iterative method's fixed per-iteration overhead, which is paid
+     * fresh on every one of ~23000 solves with nothing to amortize.
+     * Eigen::SimplicialLDLT keeps that same amortize-across-channels
+     * shape as SparseLU while still being a direct Cholesky-family
+     * solver that exploits the symmetry this reformulation unlocked --
+     * see docs/gpu-accel-texturing.md §25 for the measured comparison. */
     mve::Image<int>::Ptr indices = mve::Image<int>::create(width, height, 1);
     indices->fill(-1);
     int index = 0;
@@ -142,19 +148,18 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
     poisson_blend_build_time_sec += build_elapsed;
 
     util::WallTimer factorize_timer;
-    Eigen::ConjugateGradient<SpMat, Eigen::Lower> solver;
-    solver.setMaxIterations(1000);
-    solver.setTolerance(0.0001);
+    Eigen::SimplicialLDLT<SpMat, Eigen::Lower> solver;
     solver.compute(A);
     double factorize_elapsed = factorize_timer.get_elapsed_sec();
     #pragma omp atomic
     poisson_blend_factorize_time_sec += factorize_elapsed;
 
-    /* Exact fallback, lazily constructed and only paid for if CG actually
-     * fails to converge for this patch/channel -- same bounding-the-risk
-     * pattern as the reverted BiCGSTAB attempt (§20/§21), just now backed
-     * by a solver that's expected to converge reliably since A is
-     * genuinely SPD. */
+    /* Exact fallback, lazily constructed and only paid for if LDLT
+     * actually reports a numerical issue for this patch (should be rare
+     * given A is genuinely SPD, but floating-point roundoff on a
+     * degenerate/tiny patch is cheap insurance against, not expected to
+     * fire in the common case) -- same bounding-the-risk pattern as
+     * every non-bit-identical change in this function so far. */
     std::unique_ptr<Eigen::SparseLU<SpMat, Eigen::COLAMDOrdering<int> > > fallback_solver;
 
     util::WallTimer solve_timer;
@@ -167,8 +172,6 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
         bool need_fallback = (solver.info() != Eigen::Success);
         if (!need_fallback) {
             x = solver.solve(b);
-            #pragma omp atomic
-            poisson_blend_cg_iterations += solver.iterations();
             need_fallback = (solver.info() != Eigen::Success);
         }
         if (need_fallback) {
@@ -178,7 +181,7 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
             }
             x = fallback_solver->solve(b);
             #pragma omp atomic
-            poisson_blend_cg_fallback_count += 1;
+            poisson_blend_fallback_count += 1;
         }
 
         for (int i = 0; i < n; ++i) {

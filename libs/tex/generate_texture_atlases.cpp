@@ -164,6 +164,11 @@ generate_texture_atlases(std::vector<TexturePatch::Ptr> * orig_texture_patches,
 //     #pragma omp taskwait
 // #endif
     std::cout << "done. (Took: " << timer.get_elapsed_sec() << "s)" << std::endl;
+    std::cout << "\t[timing] atlas insert breakdown -- bin-fit (RectangularBin::insert): "
+        << atlas_insert_binfit_time_sec
+        << "s, copy+bookkeeping (copy_into + faces/texcoords): "
+        << atlas_insert_copy_time_sec
+        << "s (summed across all TextureAtlas::insert() calls)" << std::endl;
 
     // /* End of single region */
     // }

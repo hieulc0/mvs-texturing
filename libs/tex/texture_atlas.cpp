@@ -12,6 +12,7 @@
 #include <map>
 
 #include <util/file_system.h>
+#include <util/timer.h>
 #include <mve/image_tools.h>
 #include <mve/image_io.h>
 
@@ -20,6 +21,9 @@
 #ifdef MVSTEX_GPU
 #include "cuda/edge_padding_gpu.h"
 #endif
+
+double atlas_insert_binfit_time_sec = 0.0;
+double atlas_insert_copy_time_sec = 0.0;
 
 
 TextureAtlas::TextureAtlas(unsigned int size, mve::ImageType type, bool grayscale) :
@@ -95,7 +99,12 @@ TextureAtlas::insert(TexturePatch::ConstPtr texture_patch) {
     int const width = texture_patch->get_width() + 2 * padding;
     int const height = texture_patch->get_height() + 2 * padding;
     Rect<int> rect(0, 0, width, height);
-    if (!bin->insert(&rect)) return false;
+    util::WallTimer binfit_timer;
+    bool const placed = bin->insert(&rect);
+    atlas_insert_binfit_time_sec += binfit_timer.get_elapsed_sec();
+    if (!placed) return false;
+
+    util::WallTimer copy_timer;
 
     /* Update texture atlas and its validity mask. */
 
@@ -134,6 +143,7 @@ TextureAtlas::insert(TexturePatch::ConstPtr texture_patch) {
             texcoords.push_back(texcoord);
         }
     }
+    atlas_insert_copy_time_sec += copy_timer.get_elapsed_sec();
     return true;
 }
 

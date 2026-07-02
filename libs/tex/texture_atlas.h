@@ -75,6 +75,21 @@ class TextureAtlas {
         bool is_grayscale();
 };
 
+/* Diagnostic-only globals, see docs/gpu-accel-texturing.md §31 --
+ * wall-clock time summed across all TextureAtlas::insert() calls, split
+ * between the serial bin-packing decision (RectangularBin::insert, which
+ * must stay serial -- each call depends on every prior placement in the
+ * same atlas) and the pixel-copy + bookkeeping work (copy_into calls +
+ * faces/texcoords bookkeeping, which write to disjoint per-patch regions
+ * and are a parallelization candidate). Sizes whether that split is
+ * worth an API change before doing it. Plain += is safe today because
+ * the insert loop in generate_texture_atlases.cpp is still
+ * single-threaded -- would need #pragma omp atomic if/when that
+ * changes. Not safe to *read* while any insert() call may still be in
+ * flight. */
+extern double atlas_insert_binfit_time_sec;
+extern double atlas_insert_copy_time_sec;
+
 inline TextureAtlas::Ptr
 TextureAtlas::create(unsigned int size, mve::ImageType type, bool grayscale) {
     return Ptr(new TextureAtlas(size, type, grayscale));

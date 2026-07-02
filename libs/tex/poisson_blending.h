@@ -28,11 +28,4 @@ extern double poisson_blend_build_time_sec;
 extern double poisson_blend_factorize_time_sec;
 extern double poisson_blend_solve_time_sec;
 
-/* Diagnostic-only, see docs/gpu-accel-texturing.md §22 -- summed
- * Eigen::ConjugateGradient iteration counts and count of per-channel
- * fallbacks to the exact SparseLU solver (expected near 0; a nonzero
- * count means CG failed to converge for that channel). */
-extern double poisson_blend_cg_iterations;
-extern double poisson_blend_cg_fallback_count;
-
 #endif /* TEX_POISSONBLENDING_HEADER */

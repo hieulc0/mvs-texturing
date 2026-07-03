@@ -142,15 +142,7 @@ poisson_blend(mve::FloatImage::ConstPtr src, mve::ByteImage::ConstPtr mask,
     poisson_blend_call_count += 1;
 
     util::WallTimer factorize_timer;
-    /* NaturalOrdering probe, see docs/gpu-accel-texturing.md §33/§36 --
-     * was COLAMDOrdering<int>. Each patch's system is a compact,
-     * roughly-rectangular 2D grid where COLAMD's general-purpose
-     * fill-reducing heuristic may be scrambling the locality a natural
-     * raster ordering would preserve. Compare
-     * poisson_blend_factorize_time_sec against this session's
-     * COLAMDOrdering baseline (823.463s summed, §35) to decide whether
-     * to keep this or revert. */
-    Eigen::SparseLU<SpMat, Eigen::NaturalOrdering<int> > solver;
+    Eigen::SparseLU<SpMat, Eigen::COLAMDOrdering<int> > solver;
     solver.compute(A);
     double factorize_elapsed = factorize_timer.get_elapsed_sec();
     #pragma omp atomic

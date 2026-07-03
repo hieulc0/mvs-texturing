@@ -1,6 +1,13 @@
 All source files are distributed under the BSD 3-Clause License unless
 otherwise noted in the source file.
 
+NOTE: `libs/tex/poisson_blending.cpp` links against Eigen's LGPL-licensed
+`SparseCholesky` module (`Eigen::SimplicialLDLT`/`Eigen::AMDOrdering`),
+compiled without this project's otherwise-fork-wide `-DEIGEN_MPL2_ONLY`
+restriction. See `docs/EIGEN_COMPLIANCE_NOTE.md` for why and what that
+means if you consume this file outside of a project with an
+equivalent-or-stronger copyleft license (e.g. AGPL-3.0).
+
 Software License Agreement (BSD 3-Clause License)
 ---------------------------------------------------------------------------
 

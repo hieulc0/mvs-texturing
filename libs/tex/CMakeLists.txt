@@ -8,6 +8,16 @@ if(MVSTEX_GPU)
     list(APPEND HEADERS cuda/edge_padding_gpu.h)
 endif()
 
+# poisson_blending.cpp uses Eigen::SimplicialLDLT/AMDOrdering (Eigen's
+# SparseCholesky module, LGPL until Eigen 3.4+), which the project-wide
+# -DEIGEN_MPL2_ONLY (set above) blocks. -U re-undefines the macro for
+# just this one translation unit rather than lifting the restriction
+# fork-wide -- see docs/EIGEN_COMPLIANCE_NOTE.md for why this is safe
+# for this project and what it means for anyone using this file outside
+# of it.
+set_source_files_properties(poisson_blending.cpp PROPERTIES
+    COMPILE_OPTIONS "-UEIGEN_MPL2_ONLY")
+
 set(LIBRARY tex)
 add_library(${LIBRARY} STATIC ${SOURCES})
 set_property(TARGET ${LIBRARY} PROPERTY INTERPROCEDURAL_OPTIMIZATION True)
